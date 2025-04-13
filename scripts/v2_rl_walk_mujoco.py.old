@@ -84,7 +84,7 @@ class RLWalk:
         self.imu = Imu(
             sampling_freq=int(self.control_freq),
             user_pitch_bias=self.pitch_bias,
-            upside_down=True,
+            upside_down=False,
         )
 
         self.eyes = Eyes()
@@ -123,8 +123,7 @@ class RLWalk:
 
         self.paused = False
 
-        self.sounds = Sounds("/home/feisuo/Open_Duck_Mini_Runtime/mini_bdx_runtime/converted/")
-        self.sounds.play_happy()
+        self.sounds = Sounds(volume=1.0, sound_directory="../mini_bdx_runtime/assets/")
         self.antennas = Antennas()
 
         self.command_freq = 20  # hz
@@ -132,7 +131,7 @@ class RLWalk:
             self.xbox_controller = XBoxController(self.command_freq)
             self.buttons = Buttons()
 
-        self.PRM = PolyReferenceMotion("/home/feisuo/Open_Duck_Mini_Runtime/scripts/polynomial_coefficients.pkl")
+        self.PRM = PolyReferenceMotion("./polynomial_coefficients.pkl")
         self.imitation_i = 0
         self.imitation_phase = np.array([0, 0])
         self.phase_frequency_factor = 1.0
@@ -274,9 +273,8 @@ class RLWalk:
                     if self.buttons.X.triggered:
                         self.projector.switch()
 
-                    if self.buttons.B.triggered:                        
+                    if self.buttons.B.triggered:
                         self.sounds.play_random_sound()
-                        #self.sounds.play_happy()
 
                     self.antennas.set_position_left(right_trigger)
                     self.antennas.set_position_right(left_trigger)
