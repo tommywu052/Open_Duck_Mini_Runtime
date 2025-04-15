@@ -1,6 +1,6 @@
 # Open Duck Mini Runtime
 
-## Raspberry Pi zero 2W setup
+## Raspberry Pi zero 2W setup (This repo has been upgraded to RPi 4B version)
 
 ### Install Raspberry Pi OS
 
