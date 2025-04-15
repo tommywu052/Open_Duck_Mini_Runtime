@@ -4,7 +4,7 @@
 
 ### Install Raspberry Pi OS
 
-Download Raspberry Pi OS Lite (64-bit) from here : https://www.raspberrypi.com/software/operating-systems/
+Download Raspberry Pi OS (64-bit) from here : https://www.raspberrypi.com/software/operating-systems/
 
 Follow the instructions here to install the OS on the SD card : https://www.raspberrypi.com/documentation/computers/getting-started.html
 
@@ -96,6 +96,8 @@ Follow this tutorial
 > For now, don't activate `/dev/zero` when they ask
 
 https://learn.adafruit.com/adafruit-max98357-i2s-class-d-mono-amp?view=all
+
+> Or you can use 3.5 audio jack directly
 
 
 ## Install the runtime
