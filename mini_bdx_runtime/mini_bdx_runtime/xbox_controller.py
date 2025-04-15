@@ -27,9 +27,9 @@ class XBoxController:
         self.last_left_trigger = 0.0
         self.last_right_trigger = 0.0
         pygame.init()
-        self.p1 = pygame.joystick.Joystick(0)
-        self.p1.init()
-        print(f"Loaded joystick with {self.p1.get_numaxes()} axes.")
+        self.p1 = None #pygame.joystick.Joystick(0)
+        #self.p1.init()
+        
         self.cmd_queue = Queue(maxsize=1)
 
         self.A_pressed = False
@@ -39,7 +39,39 @@ class XBoxController:
         self.LB_pressed = False
         self.RB_pressed = False
 
+        pygame.init()
+        pygame.joystick.init()
+        #print(f"Loaded joystick with {self.p1.get_numaxes()} axes.")
+
         Thread(target=self.commands_worker, daemon=True).start()
+        Thread(target=self.joystick_monitor, daemon=True).start()
+
+    def try_init_joystick(self):
+        if pygame.joystick.get_count() > 0:
+            self.p1 = pygame.joystick.Joystick(0)
+            self.p1.init()
+            print(f"[Joystick] Connected: {self.p1.get_name()} with {self.p1.get_numaxes()} axes.")
+            return True
+        return False
+
+    def joystick_monitor(self):
+        """Continuously check if joystick is connected and initialize it."""
+        while self.p1 is None:
+            try:
+                pygame.joystick.quit()
+                pygame.joystick.init()
+
+                if pygame.joystick.get_count() > 0:
+                    self.p1 = pygame.joystick.Joystick(0)
+                    self.p1.init()
+                    print(f"[Joystick] Connected: {self.p1.get_name()}")
+                else:
+                    print("[Joystick] Not connected, retrying...")
+
+            except Exception as e:
+                print(f"[Joystick] Error during re-init: {e}")
+
+        time.sleep(2)
 
     def commands_worker(self):
         while True:
@@ -47,6 +79,12 @@ class XBoxController:
             time.sleep(1 / self.command_freq)
 
     def get_commands(self):
+        if self.p1 is None:
+        # Joystick not connected — return last known commands or zeroes
+            return self.last_commands
+
+        #pygame.event.pump()
+
         last_commands = self.last_commands
         left_trigger = self.last_left_trigger
         right_trigger = self.last_right_trigger
