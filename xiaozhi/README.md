@@ -19,3 +19,6 @@ sudo systemctl start open-duck-mini.service <br>
 ### ssh rpi4 to check the log
 ``` tail -f duck_runtime.log ```
 
+### Modify your prompt as my prompt - ```xiaozhi-prompt.txt``` in the Xiaozhi backend
+
+
