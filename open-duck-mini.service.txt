@@ -1,0 +1,17 @@
+[Unit]
+Description=Open Duck Mini Runtime
+After=network.target sound.target
+
+[Service]
+Type=simple
+ExecStart=/home/raspberry/Open_Duck_Mini_Runtime/scripts/run_duck_on_boot.sh
+WorkingDirectory=/home/raspberry/Open_Duck_Mini_Runtime/scripts
+User=raspberry
+Group=raspberry
+Environment="PATH=/home/raspberry/.virtualenvs/open-duck-mini-runtime/bin:/usr/bin:/bin"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PULSE_SERVER=unix:/run/user/1000/pulse/native"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

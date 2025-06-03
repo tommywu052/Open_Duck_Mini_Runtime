@@ -2,7 +2,7 @@
 requests==2.32.3
 paho-mqtt==2.1.0
 PyAudio==0.2.14
-edev==1.9.1
+evdev==1.9.1
 opuslib==3.0.1
 cryptography==44.0.0
 sounddevice==0.5.1

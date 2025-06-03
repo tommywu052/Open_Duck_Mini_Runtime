@@ -6,7 +6,7 @@ import requests
 import paho.mqtt.client as mqtt
 import threading
 import pyaudio
-import opuslib  # windwos平台需要将opus.dll 拷贝到C:\Windows\System32
+import opuslib 
 import socket
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
@@ -19,13 +19,63 @@ import queue
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 
+import random
+import sounddevice as sd
+import wave
+import azure.cognitiveservices.speech as speechsdk
+import time
+from mini_bdx_runtime.sounds import Sounds
+from mini_bdx_runtime.xbox_controller import XBoxController
+from mini_bdx_runtime.buttons import Buttons
+from mini_bdx_runtime.projector import Projector
+from v2_rl_walk_mujoco import RLWalk 
+
+import subprocess
+import signal
+import sys
+sys.dont_write_bytecode = True
+
+
+led_proc = None  # Global or persistent reference
+
+myprojector = Projector()
+
+#Replace with your sound directory path
+mysounds = Sounds(volume=1.0, sound_directory="/home/raspberry/Open_Duck_Mini_Runtime/mini_bdx_runtime/assets/")
+
+#Replace with your ONNX model path
+rl_walk = RLWalk(
+        '/home/raspberry/Open_Duck_Mini_Runtime/scripts/BEST_WALK_ONNX_2.onnx',
+        action_scale=0.25,
+        pid=[42, 0, 0],
+        control_freq=50,
+        commands=True,
+        pitch_bias=0,
+        save_obs=False,
+        replay_obs=None,
+        cutoff_frequency=40,
+    )
+print("Done instantiating RLWalk")
 
 # Replace with your actual input event path
-keyboard_path = '/dev/input/event0'
+keyboard_path = '/dev/input/event2'
 keyboard = InputDevice(keyboard_path)
 
+# Replace with your Azure Speech Service subscription key and region for keyword wakeup
+speech_key = ""
+speech_region = "eastus2"
+
+# Your custom keyword's recognition text
+keyword = "mygreen"
+
+# Replace with your Path to the custom keyword `.tbl` file
+keyword_model_file = "/home/raspberry/Open_Duck_Mini_Runtime/scripts/d870ebf5-3a95-4446-97a1-84e5f5ce27b9.table"
+
+
+
 OTA_VERSION_URL = 'https://api.tenclass.net/xiaozhi/ota/'
-MAC_ADDR = 'dc:a6:32:9a:60:19'
+#replace with your mac address
+MAC_ADDR = ''
 # {"mqtt":{"endpoint":"post-cn-apg3xckag01.mqtt.aliyuncs.com","client_id":"GID_test@@@cc_ba_97_20_b4_bc",
 # "username":"Signature|LTAI5tF8J3CrdWmRiuTjxHbF|post-cn-apg3xckag01","password":"0mrkMFELXKyelhuYy2FpGDeCigU=",
 # "publish_topic":"device-server","subscribe_topic":"devices"},"firmware":{"version":"0.9.9","url":""}}
@@ -70,6 +120,19 @@ send_audio_thread = threading.Thread()
 mqttc = None
 
 
+
+def playAudio(audio_file):
+    # Open the file using wave module
+    with wave.open(audio_file, 'rb') as wf:
+        # Read the audio data
+        audio_data = wf.readframes(wf.getnframes())
+        # Convert the byte data to numpy array
+        import numpy as np
+        audio_data = np.frombuffer(audio_data, dtype=np.int16)
+
+        # Play the audio data without blocking
+        sd.play(audio_data, wf.getframerate())
+
 def get_ota_version():
     global mqtt_info
     header = {
@@ -100,6 +163,7 @@ def get_ota_version():
     print(response.text)
     logging.info(f"get version: {response}")
     mqtt_info = response.json()['mqtt']
+    print(mqtt_info)
 
 
 def aes_ctr_encrypt(key, nonce, plaintext):
@@ -131,11 +195,20 @@ def send_audio():
                 continue
                 time.sleep(0.1)
             # 读取音频数据
-            data = mic.read(960)
+            try:
+                data = mic.read(960)
+                if not data:
+                    print("No mic data received.")
+                    continue
+                #print(f"[MIC] Read {len(data)} bytes of audio")
+            except Exception as e:
+                print(f"[MIC ERROR] {e}")
+                continue
+
             # 编码音频数据
             encoded_data = encoder.encode(data, 960)
             # 打印音频数据
-            # print(f"Encoded data: {len(encoded_data)}")
+            #print(f"Encoded data: {len(encoded_data)}")
             # nonce插入data.size local_sequence_
             local_sequence += 1
             new_nonce = nonce[0:4] + format(len(encoded_data), '04x') + nonce[8:24] + format(local_sequence, '08x')
@@ -191,21 +264,31 @@ def recv_audio():
         spk.close()
 
 
+is_walking = False
+def simulate_walking(direction, duration):
+    global is_walking
+    is_walking = True
+    simulate_joystick_push_threadsafe(direction, duration)
+
+    def clear_flag_later():
+        global is_walking
+        time.sleep(duration)
+        is_walking = False
+        print("Walking finished.")
+
+    threading.Thread(target=clear_flag_later).start()
+    
 def on_message(client, userdata, message):
-    global aes_opus_info, udp_socket, tts_state, recv_audio_thread, send_audio_thread
+    global aes_opus_info, udp_socket, tts_state, recv_audio_thread, send_audio_thread , is_walking
+    global led_proc
     msg = json.loads(message.payload)
     print(f"recv msg: {msg}")
     if msg['type'] == 'hello':
         aes_opus_info = msg
+        if not udp_socket:
+            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
         udp_socket.connect((msg['udp']['server'], msg['udp']['port']))
-        # 发送 iot msg
-        # iot_msg['session_id'] = msg['session_id']
-        # push_mqtt_msg(iot_msg)
-        # print(f"send iot message: {iot_msg}")
-        # 发送 iot status消息
-        # iot_status_msg['session_id'] = msg['session_id']
-        # print(f"send iot status message: {iot_status_msg}")
-        # push_mqtt_msg(iot_status_msg)
+
         # 检查recv_audio_thread线程是否启动
         if not recv_audio_thread.is_alive():
             # 启动一个线程，用于接收音频数据
@@ -220,19 +303,117 @@ def on_message(client, userdata, message):
             send_audio_thread.start()
         else:
             print("send_audio_thread is alive")
-    if msg['type'] == 'tts':
+    #Control Robot movement with resposne JSON content
+    if msg['type'] == 'tts' and 'text' in msg: 
+        jsoncontent = msg.get('text', '')
+        try:
+            # Try to parse the text as JSON
+            data = json.loads(jsoncontent)
+            # Check if it's a dict and has a 'direction' key
+            if isinstance(data, dict) and 'direction' in data:
+                direction = data['direction']
+                print(f"Direction received: {direction}")
+                simulate_joystick_push_threadsafe(direction, duration=6.0)
+                is_walking = True
+                # You can now use 'direction' as needed
+        except json.JSONDecodeError:
+            # Not valid JSON, do nothing
+            pass
+    print("Is_walking: ")
+    print(is_walking)
+    #Control robot head movement with llm resposne (emotion TBD)
+    if msg.get('type') == 'llm': #and not is_walking :
+        action = random.choice(["headrotate", "headmove", "headbob","headup","headdown"])
+        print(f"Triggering head action: {action}")
+        if action == "headbob":
+            simulate_headbob(n=random.randint(1, 2))
+        else:
+            simulate_joystick_push_threadsafe(action, duration=random.uniform(0.8, 2))
+
+    if msg['type'] == 'tts':        
         tts_state = msg['state']
+        # Choose mode: "flow", "gradient", or "white"
+        led_proc.send_signal(signal.SIGINT)
+        led_proc.wait()
+        led_mode = "white"  # Example mode
+        led_proc = subprocess.Popen([
+            'sudo', '/home/raspberry/.virtualenvs/open-duck-mini-runtime/bin/python',
+            '/home/raspberry/Open_Duck_Mini_Runtime/scripts/led2812_flow.py',
+            '--mode', led_mode
+        ])
+
+
+        if msg['state']:
+            if msg['state'] == 'stop':
+                print("tts ended")
+                try:
+                    led_proc.send_signal(signal.SIGINT)
+                    led_proc.wait()
+                    led_mode = "gradient"  # Example mode
+
+                    led_proc = subprocess.Popen([
+                        'sudo', '/home/raspberry/.virtualenvs/open-duck-mini-runtime/bin/python',
+                        '/home/raspberry/Open_Duck_Mini_Runtime/scripts/led2812_flow.py',
+                        '--mode', led_mode
+                    ])
+                except Exception as e:
+                    print(f"Kill Process exception: {e}") # Log potential errors
+                #time.sleep(1)
+                #on_space_key_press()
+                #print("listening...")
+                
+                #time.sleep(4)
+                #on_space_key_release()
+                """ if not send_audio_thread.is_alive():
+                    # 启动一个线程，用于发送音频数据
+                    send_audio_thread = threading.Thread(target=send_audio)
+                    send_audio_thread.start() """
+    
+
     if msg['type'] == 'goodbye' and udp_socket and msg['session_id'] == aes_opus_info['session_id']:
         print(f"recv good bye msg")
         aes_opus_info['session_id'] = None
+        # led_proc.send_signal(signal.SIGINT)
+        # led_proc.wait()
+        # led_mode = "flow"  # Example mode
 
+        # led_proc = subprocess.Popen([
+        #     'sudo', '/home/raspberry/.virtualenvs/open-duck-mini-runtime/bin/python',
+        #     'led2812_flow.py',
+        #     '--mode', led_mode
+        # ])
 
+        try:
+            # Ensure old socket is closed if it exists and isn't already None
+            if udp_socket:
+                udp_socket.close()
+        except Exception as e:
+            print(f"Error closing old socket: {e}") # Log potential errors
+
+def simulate_headbob(n=1):
+    for _ in range(n):
+        simulate_joystick_push_threadsafe("headleftdown", duration=0.3)
+        time.sleep(0.35)
+        simulate_joystick_push_threadsafe("headrightdown", duration=0.3)
+        time.sleep(0.35)
+        
 def on_connect(client, userdata, flags, rs, pr):
     # subscribe_topic = mqtt_info['subscribe_topic'].split("/")[0] + '/p2p/GID_test@@@' + MAC_ADDR.replace(':', '_')
     # print(f"subscribe topic: {subscribe_topic}")
     # 订阅主题
     # client.subscribe(subscribe_topic)
     print("connect to mqtt server")
+    # Start the LED blinking script with sudo
+    # Choose mode: "flow", "gradient", or "white"
+    led_mode = "gradient"  # Example mode
+    global led_proc
+    
+    led_proc = subprocess.Popen([
+        'sudo', '/home/raspberry/.virtualenvs/open-duck-mini-runtime/bin/python',
+        '/home/raspberry/Open_Duck_Mini_Runtime/scripts/led2812_flow.py',
+        '--mode', led_mode
+    ])
+
 
 
 def push_mqtt_msg(message):
@@ -301,7 +482,9 @@ q = queue.Queue()
 def audio_callback(indata, frames, time, status):
     q.put(bytes(indata))
 
+#Use this function if you want to leverage vosk wakeup model
 def keyword_listener():
+    #Replace with your model path
     model = Model("vosk-model-small-cn-0.22")  # download Vosk model and point this to its folder
     rec = KaldiRecognizer(model, 16000)
     
@@ -314,6 +497,7 @@ def keyword_listener():
             if rec.AcceptWaveform(data):
                 result = json.loads(rec.Result())
                 text = result.get("text", "").lower()
+                print(text)
                 print(key_state)
 
                 if "小绿" in text or "你好" in text:
@@ -321,23 +505,102 @@ def keyword_listener():
                     on_space_key_press()
                     # Schedule automatic release after 3 seconds
                     def auto_release():
-                        time.sleep(3)  # Simulate holding for 3 seconds
+                        time.sleep(4)  # Simulate holding for 3 seconds
                         on_space_key_release()
 
                     threading.Thread(target=auto_release).start()
-                # elif "再见" in text and key_state == "press":
-                #     print("Detected STOP keyword")
-                #     on_space_key_release()
+
+def simulate_forward_burst(rl_walk, duration=2.0):
+    rl_walk.simulate_forward = True
+    time.sleep(duration)
+    rl_walk.simulate_forward = False    
+
+def simulate_joystick_push_threadsafe(direction, duration=2.0):
+    def run_push():     
+        rl_walk.simulated_joystick = direction
+        time.sleep(duration)
+        rl_walk.simulated_joystick = None
+    threading.Thread(target=run_push, daemon=True).start()
+
+
+#Use this function to trigger to listen microphone auido to STT.
+#1.Use azure wakeup custom model to trigger (remarked now)
+#2.Use Xbox Controller (X)button to trigger (Currently Use)
+
+def keyword_wake():
+    # Set up the speech configuration and audio input
+    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=speech_region)
+    audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
+
+    # Load the keyword recognition model
+    keyword_model = speechsdk.KeywordRecognitionModel(keyword_model_file)
+
+    # Create the recognizer
+    recognizer = speechsdk.KeywordRecognizer(audio_config=audio_config)
+
+    print(f"Listening continuously for the keyword: '{keyword}'... (Press Ctrl+C to stop)")
+    mysounds.play_random_sound()
+    print("Done parsing args")
+    #When Place X button, also enable the head movement control
+    rl_walk.xbox_controller.head_control_mode = True
+    
+    
+     # Start walking in a new thread    
+    #threading.Thread(target=rl_walk.run, daemon=True).start()
+    #rl_walk.simulate_forward = True
+        # Simulate pushing the left stick forward (Y-axis negative is usually forward)
+    
+    #rl_walk.run()
+
+    #playAudio("/home/raspberry/Open_Duck_Mini_Runtime/scripts/8378.wav")
+    #record_audio("keyword_detection_clean.wav", duration=3)
+    print("RLWalk:")
+    
+    prev_x_state = False
+    try:
+        while True:
+            # Start keyword recognition
+            #print(rl_walk.buttons.X.triggered)
+            #print("xbox-controller status:")
+            #print(rl_walk.xbox_controller.head_control_mode)
+            curr_x_state = rl_walk.xbox_controller.X_pressed
+            #if conn_state :
+            if curr_x_state and not prev_x_state:
+                 # X Button just pressed
+                on_space_key_press()
+            #time.sleep(4)
+            elif not curr_x_state and prev_x_state:
+                 # X Button just released
+                on_space_key_release()
+
+            prev_x_state = curr_x_state
+            time.sleep(0.01)  # Sleep 10 ms to avoid hogging CPU
             
+            """ result = recognizer.recognize_once_async(model=keyword_model).get()
+
+            # Process the recognition result
+            if result.reason == speechsdk.ResultReason.RecognizedKeyword:
+                print(f"Keyword recognized: {result.text}")
+                on_space_key_press()
+                recognizer.stop_recognition_async()
+                myprojector.switch()
+                playAudio("./8378.wav")  
+                #threading.Thread(target=simulate_forward_burst, args=(rl_walk,), daemon=True).start()              
+                #time.sleep(4)
+                #on_space_key_release()
                 
+            else:
+                print(f"Keyword not recognized. Reason: {result.reason}") """
+    except KeyboardInterrupt:
+        print("\nStopping keyword recognition.")
+    except Exception as e:
+        print(f"Error occurred: {e}")                
 
 def on_space_key_press():
     global key_state, udp_socket, aes_opus_info, listen_state, conn_state
-    print("key pressed")
-    if key_state == "press":
-        return
-    key_state = "press"
-    # 判断是否需要发送hello消息
+    print("key pressed==>")
+    print('connect state')
+    print(conn_state)
     if conn_state is False or aes_opus_info['session_id'] is None:
         conn_state = True
         # 发送hello消息,建立udp连接
@@ -352,12 +615,15 @@ def on_space_key_press():
     if aes_opus_info['session_id'] is not None:
         # 发送start listen消息
         msg = {"session_id": aes_opus_info['session_id'], "type": "listen", "state": "start", "mode": "manual"}
+        #time.sleep(0.5)
         print(f"send start listen message: {msg}")
         push_mqtt_msg(msg)
 
 
 def on_space_key_release():
     global aes_opus_info, key_state
+    print("keystate:")
+    print(key_state)
     key_state = "release"
     # 发送stop listen消息
     if aes_opus_info['session_id'] is not None:
@@ -403,12 +669,15 @@ def run():
     # 获取mqtt与版本信息
     get_ota_version()
     # 监听键盘按键，当按下空格键时，发送listen消息
-    #listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+    #listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release) # I Drop this since RPI does not support in CLI mode
     #listener.start()
     # Start keyboard listener in a separate thread
     t = threading.Thread(target=keyboard_listener, daemon=True)
     t.start()
     #threading.Thread(target=keyword_listener, daemon=True).start()
+    # Start walking in a new thread    
+    threading.Thread(target=rl_walk.run, daemon=True).start()
+    threading.Thread(target=keyword_wake, daemon=True).start()
     # 创建客户端实例
     mqttc = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id=mqtt_info['client_id'])
     mqttc.username_pw_set(username=mqtt_info['username'], password=mqtt_info['password'])

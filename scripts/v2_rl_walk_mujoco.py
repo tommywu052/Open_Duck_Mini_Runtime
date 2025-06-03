@@ -2,7 +2,6 @@ import time
 import pickle
 
 import numpy as np
-
 from mini_bdx_runtime.rustypot_position_hwi import HWI
 from mini_bdx_runtime.onnx_infer import OnnxInfer
 
@@ -15,16 +14,21 @@ from mini_bdx_runtime.sounds import Sounds
 from mini_bdx_runtime.antennas import Antennas
 from mini_bdx_runtime.projector import Projector
 from mini_bdx_runtime.rl_utils import make_action_dict, LowPassActionFilter
-from mini_bdx_runtime.buttons import Buttons
+from mini_bdx_runtime.duck_config import DuckConfig
+
+import os
+
+HOME_DIR = os.path.expanduser("~")
 
 
 class RLWalk:
     def __init__(
         self,
         onnx_model_path: str,
+        duck_config_path: str = f"{HOME_DIR}/duck_config.json",
         serial_port: str = "/dev/ttyACM0",
         control_freq: float = 50,
-        pid=[32, 0, 0],
+        pid=[30, 0, 0],
         action_scale=0.25,
         commands=False,
         pitch_bias=0,
@@ -32,6 +36,12 @@ class RLWalk:
         replay_obs=None,
         cutoff_frequency=None,
     ):
+
+        # speech-control :different head movement and body action
+        self.simulated_joystick = None  # can be 'forward', 'backward', 'left', 'right', or None
+
+        self.duck_config = DuckConfig(config_json_path=duck_config_path)
+
         self.commands = commands
         self.pitch_bias = pitch_bias
 
@@ -44,25 +54,6 @@ class RLWalk:
         # Control
         self.control_freq = control_freq
         self.pid = pid
-
-        self.joints_order = [
-            "left_hip_yaw",
-            "left_hip_roll",
-            "left_hip_pitch",
-            "left_knee",
-            "left_ankle",
-            "neck_pitch",
-            "head_pitch",
-            "head_yaw",
-            "head_roll",
-            # "left_antenna",
-            # "right_antenna",
-            "right_hip_yaw",
-            "right_hip_roll",
-            "right_hip_pitch",
-            "right_knee",
-            "right_ankle",
-        ]
 
         self.save_obs = save_obs
         if self.save_obs:
@@ -78,17 +69,15 @@ class RLWalk:
                 self.control_freq, cutoff_frequency
             )
 
-        self.hwi = HWI(serial_port)
+        self.hwi = HWI(self.duck_config, serial_port)
+
         self.start()
 
         self.imu = Imu(
             sampling_freq=int(self.control_freq),
             user_pitch_bias=self.pitch_bias,
-            upside_down=True,
+            upside_down=self.duck_config.imu_upside_down,
         )
-
-        self.eyes = Eyes()
-        self.projector = Projector()
 
         self.feet_contacts = FeetContacts()
 
@@ -99,50 +88,40 @@ class RLWalk:
         self.last_last_action = np.zeros(self.num_dofs)
         self.last_last_last_action = np.zeros(self.num_dofs)
 
-        self.init_pos = [
-            0.002,
-            0.053,
-            -0.63,
-            1.368,
-            -0.784,
-            0,
-            0,
-            0,
-            0,
-            -0.003,
-            -0.065,
-            0.635,
-            1.379,
-            -0.796,
-        ]
+        self.init_pos = list(self.hwi.init_pos.values())
 
         self.motor_targets = np.array(self.init_pos.copy())
         self.prev_motor_targets = np.array(self.init_pos.copy())
 
         self.last_commands = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-        self.paused = False
-
-        self.sounds = Sounds("/home/feisuo/Open_Duck_Mini_Runtime/mini_bdx_runtime/converted/")
-        self.sounds.play_happy()
-        self.antennas = Antennas()
+        self.paused = self.duck_config.start_paused
 
         self.command_freq = 20  # hz
         if self.commands:
             self.xbox_controller = XBoxController(self.command_freq)
-            self.buttons = Buttons()
 
-        self.PRM = PolyReferenceMotion("/home/feisuo/Open_Duck_Mini_Runtime/scripts/polynomial_coefficients.pkl")
+        # Reference motion, but we only really need the length of one phase
+        # TODO
+        self.PRM = PolyReferenceMotion("/home/raspberry/Open_Duck_Mini_Runtime/scripts/polynomial_coefficients.pkl")
         self.imitation_i = 0
         self.imitation_phase = np.array([0, 0])
         self.phase_frequency_factor = 1.0
-        self.phase_frequency_factor_offset = 0.0
+        self.phase_frequency_factor_offset = (
+            self.duck_config.phase_frequency_factor_offset
+        )
 
-    def add_fake_head(self, pos):
-        # add just the antennas now
-        assert len(pos) == self.num_dofs
-        pos_with_head = np.insert(pos, 9, [0, 0])
-        return np.array(pos_with_head)
+        # Optional expression features
+        if self.duck_config.eyes:
+            self.eyes = Eyes()
+        if self.duck_config.projector:
+            self.projector = Projector()
+        if self.duck_config.speaker:
+            self.sounds = Sounds(
+                volume=1.0, sound_directory="/home/raspberry/Open_Duck_Mini_Runtime/mini_bdx_runtime/assets/"
+            )
+        if self.duck_config.antennas:
+            self.antennas = Antennas()
 
     def get_obs(self):
 
@@ -199,6 +178,7 @@ class RLWalk:
         kps = [self.pid[0]] * 14
         kds = [self.pid[2]] * 14
 
+        # lower head kps
         kps[5:9] = [8, 8, 8, 8]
 
         self.hwi.set_kps(kps)
@@ -227,59 +207,75 @@ class RLWalk:
             while True:
                 left_trigger = 0
                 right_trigger = 0
-                up_down = 0
                 t = time.time()
 
                 if self.commands:
-                    (
-                        self.last_commands,
-                        A_pressed,
-                        B_pressed,
-                        X_pressed,
-                        Y_pressed,
-                        LB_pressed,
-                        RB_pressed,
-                        left_trigger,
-                        right_trigger,
-                        up_down,
-                    ) = self.xbox_controller.get_last_command()
-
-                    self.buttons.update(
-                        A_pressed,
-                        B_pressed,
-                        X_pressed,
-                        Y_pressed,
-                        LB_pressed,
-                        RB_pressed,
-                        up_down == 1,
-                        up_down == -1
+                    self.last_commands, self.buttons, left_trigger, right_trigger = (
+                        self.xbox_controller.get_last_command()
                     )
+
+
+                    # speech-control - Override joystick input if simulating movement
+                    if self.simulated_joystick == "forward":
+                        self.last_commands[0] = 0.15  # forward
+                        self.last_commands[1] = 0.0
+                    elif self.simulated_joystick == "backward":
+                        self.last_commands[0] = -0.15  # backward
+                        self.last_commands[1] = 0.0
+                    elif self.simulated_joystick == "left":
+                        self.last_commands[0] = 0.0
+                        self.last_commands[2] = -1  # turn left
+                    elif self.simulated_joystick == "right":
+                        self.last_commands[0] = 0.0
+                        self.last_commands[2] = 1  # turn right
+
+                    # speech-control - Override joystick input if head movement
+                    if self.simulated_joystick == "headleftdown":
+                        self.last_commands[4] = -0.1  # headleftdown
+                        self.last_commands[6] = 0.3
+                    elif self.simulated_joystick == "headrightdown":
+                        self.last_commands[4] = -0.08  # headrightdown
+                        self.last_commands[6] = -0.3
+                    elif self.simulated_joystick == "headrotate":
+                        self.last_commands[4] = -0.08
+                        self.last_commands[5] = 0.25  # turn left
+                        self.last_commands[6] = -0.05
+                    elif self.simulated_joystick == "headup":
+                        self.last_commands[4] = 0.25
+                        self.last_commands[5] = -0.08  # turn right
+                    elif self.simulated_joystick == "headdown":
+                        self.last_commands[4] = -0.25
+                        self.last_commands[5] = -0.08  # turn right
+
 
                     if self.buttons.dpad_up.triggered:
                         self.phase_frequency_factor_offset += 0.05
-                        print(f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}")
-                    
+                        print(
+                            f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}"
+                        )
+
                     if self.buttons.dpad_down.triggered:
                         self.phase_frequency_factor_offset -= 0.05
-                        print(f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}")
+                        print(
+                            f"Phase frequency factor offset {round(self.phase_frequency_factor_offset, 3)}"
+                        )
 
                     if self.buttons.LB.is_pressed:
                         self.phase_frequency_factor = 1.3
                     else:
                         self.phase_frequency_factor = 1.0
 
-                    # self.phase_frequency_factor = self.get_phase_frequency_factor(self.last_commands[0])
-                    # print(f"Phase frequency factor {self.phase_frequency_factor}")
-
                     if self.buttons.X.triggered:
-                        self.projector.switch()
+                        if self.duck_config.projector:
+                            self.projector.switch()
 
-                    if self.buttons.B.triggered:                        
-                        self.sounds.play_random_sound()
-                        #self.sounds.play_happy()
+                    if self.buttons.B.triggered:
+                        if self.duck_config.speaker:
+                            self.sounds.play_random_sound()
 
-                    self.antennas.set_position_left(right_trigger)
-                    self.antennas.set_position_right(left_trigger)
+                    if self.duck_config.antennas:
+                        self.antennas.set_position_left(right_trigger)
+                        self.antennas.set_position_right(left_trigger)
 
                     if self.buttons.A.triggered:
                         self.paused = not self.paused
@@ -296,7 +292,9 @@ class RLWalk:
                 if obs is None:
                     continue
 
-                self.imitation_i += 1 * (self.phase_frequency_factor + self.phase_frequency_factor_offset)
+                self.imitation_i += 1 * (
+                    self.phase_frequency_factor + self.phase_frequency_factor_offset
+                )
                 self.imitation_i = self.imitation_i % self.PRM.nb_steps_in_period
                 self.imitation_phase = np.array(
                     [
@@ -329,13 +327,13 @@ class RLWalk:
 
                 self.motor_targets = self.init_pos + action * self.action_scale
 
-                self.motor_targets = np.clip(
-                    self.motor_targets,
-                    self.prev_motor_targets
-                    - self.max_motor_velocity * (1 / self.control_freq),  # control dt
-                    self.prev_motor_targets
-                    + self.max_motor_velocity * (1 / self.control_freq),  # control dt
-                )
+                # self.motor_targets = np.clip(
+                #     self.motor_targets,
+                #     self.prev_motor_targets
+                #     - self.max_motor_velocity * (1 / self.control_freq),  # control dt
+                #     self.prev_motor_targets
+                #     + self.max_motor_velocity * (1 / self.control_freq),  # control dt
+                # )
 
                 if self.action_filter is not None:
                     self.action_filter.push(self.motor_targets)
@@ -350,7 +348,9 @@ class RLWalk:
                 head_motor_targets = self.last_commands[3:] + self.motor_targets[5:9]
                 self.motor_targets[5:9] = head_motor_targets
 
-                action_dict = make_action_dict(self.motor_targets, self.joints_order)
+                action_dict = make_action_dict(
+                    self.motor_targets, list(self.hwi.joints.keys())
+                )
 
                 self.hwi.set_position_all(action_dict)
 
@@ -366,10 +366,11 @@ class RLWalk:
                 time.sleep(max(0, 1 / self.control_freq - took))
 
         except KeyboardInterrupt:
-            pass
+            if self.duck_config.antennas:
+                self.antennas.stop()
 
         if self.save_obs:
-            pickle.dump(self.saved_obs, open("robot_saved_obs.pkl", "wb"))
+            pickle.dump(self.saved_obs, open("/home/raspberry/Open_Duck_Mini_Runtime/scripts/robot_saved_obs.pkl", "wb"))
         print("TURNING OFF")
 
 
@@ -378,8 +379,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx_model_path", type=str, required=True)
+    parser.add_argument(
+        "--duck_config_path",
+        type=str,
+        required=False,
+        default=f"{HOME_DIR}/duck_config.json",
+    )
     parser.add_argument("-a", "--action_scale", type=float, default=0.25)
-    parser.add_argument("-p", type=int, default=32)
+    parser.add_argument("-p", type=int, default=30)
     parser.add_argument("-i", type=int, default=0)
     parser.add_argument("-d", type=int, default=0)
     parser.add_argument("-c", "--control_freq", type=int, default=50)
@@ -404,7 +411,7 @@ if __name__ == "__main__":
         default=None,
         help="replay the observations from a previous run (can be from the robot or from mujoco)",
     )
-    parser.add_argument("--cutoff_frequency", type=float, default=40)
+    parser.add_argument("--cutoff_frequency", type=float, default=None)
 
     args = parser.parse_args()
     pid = [args.p, args.i, args.d]
@@ -412,6 +419,7 @@ if __name__ == "__main__":
     print("Done parsing args")
     rl_walk = RLWalk(
         args.onnx_model_path,
+        duck_config_path=args.duck_config_path,
         action_scale=args.action_scale,
         pid=pid,
         control_freq=args.control_freq,
