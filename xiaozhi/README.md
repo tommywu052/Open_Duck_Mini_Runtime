@@ -5,7 +5,8 @@
 1.Copy all the files under this folder to ../scripts </BR>
 2.Replace with the path related and mac address in py-xiaozhi.py</BR>
 3.Clone ```led2812_flow.py``` from my repo to ../scripts <br>
-4.Run ```python py-xiaozhi.py```
+4.Run ```python py-xiaozhi.py``` <br>
+5.I also have a shell script ```run_duck_on_boot.sh``` to easily run through , you can test it and use that as service entry point
 
 ### You need to modify - ```v2_rl_walk_mujoco.py``` under ../scripts , check my repo from #218-#248
 ```
