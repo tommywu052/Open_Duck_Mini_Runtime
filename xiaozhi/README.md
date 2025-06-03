@@ -3,7 +3,7 @@
 ## Raspberry Pi 4 Used.
 
 1.Copy all the files under this folder to ../scripts </BR>
-2.Replace with the path related in py-xiaozhi.py</BR>
+2.Replace with the path related and mac address in py-xiaozhi.py</BR>
 3.Run ```python py-xiaozhi.py```
 
 ## Running as system service (Must to modify all your relative path to absolute path in python)
